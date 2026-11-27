@@ -1,5 +1,5 @@
 /**
- * SmallBall Tournament (v2.8: 🧪 Mock tournament: plays a whole pretend bracket through the real Discord posts, then 🗑️ deletes them; v2.7: every time says its zone (MT in the Sheet and form, "your time" in Discord, your zone on the pages); MAX_PER_OWNER lets an owner enter more than one club (🛠 Allow two clubs per owner); v2.6: 🏦 Prize Vault: club 1008's ticket tray published hourly for the Prize Vault page, with donors credited automatically, and a 🎁 Donate link on every bracket board; v2.5: ⛳ Scramble matches are 18 holes of match play from the box scores, with birdie/eagle scorecards (🔑 Connect SmallBall box scores; Nassau if they can't be read); v2.4: 📣 announcement menu item, 🔎 matchup cards; v2.3: ⛳ Two Man Scramble format (two-club teams, Nassau scoring) with its own golf-course bracket page; v2.2: the 🆕 New tournament pop-up is back, with run-alongside; v2.1: several tournaments at once in one Sheet, each with its own form, tabs and page; v2.0: Tournament Central: one Sheet runs tournament after tournament (🆕 New tournament), a ✅ Health check, and a Tournaments page; v1.4: the live bracket can live on GitHub Pages; v1.3: sleeps when nothing is due, to save Google run time; v1.2: a bracket preview while sign-ups are open; v1.1: blank-form sign-ups for returning players) · by Slip (slipnsliders) for the SmallBall community
+ * SmallBall Tournament (v2.9: random seeding keeps one owner's clubs apart (opposite halves, as late a meeting as the bracket allows); v2.8: 🧪 Mock tournament: plays a whole pretend bracket through the real Discord posts, then 🗑️ deletes them; v2.7: every time says its zone (MT in the Sheet and form, "your time" in Discord, your zone on the pages); MAX_PER_OWNER lets an owner enter more than one club (🛠 Allow two clubs per owner); v2.6: 🏦 Prize Vault: club 1008's ticket tray published hourly for the Prize Vault page, with donors credited automatically, and a 🎁 Donate link on every bracket board; v2.5: ⛳ Scramble matches are 18 holes of match play from the box scores, with birdie/eagle scorecards (🔑 Connect SmallBall box scores; Nassau if they can't be read); v2.4: 📣 announcement menu item, 🔎 matchup cards; v2.3: ⛳ Two Man Scramble format (two-club teams, Nassau scoring) with its own golf-course bracket page; v2.2: the 🆕 New tournament pop-up is back, with run-alongside; v2.1: several tournaments at once in one Sheet, each with its own form, tabs and page; v2.0: Tournament Central: one Sheet runs tournament after tournament (🆕 New tournament), a ✅ Health check, and a Tournaments page; v1.4: the live bracket can live on GitHub Pages; v1.3: sleeps when nothing is due, to save Google run time; v1.2: a bracket preview while sign-ups are open; v1.1: blank-form sign-ups for returning players) · by Slip (slipnsliders) for the SmallBall community
  * A Google Sheet + Form + Apps Script that runs a SmallBall tournament on its own:
  *   sign-ups on a Google Form → a seeded bracket → fixed waves of matches → BigLeague games found on
  *   SmallBall automatically → results posted to Discord once each game has aired (no spoilers) → a live
@@ -460,9 +460,46 @@ function createTournament_(entrants, C) {
   let fmt = lc_(C.FORMAT) === 'single' ? 'single' : 'double';
   if (fmt === 'double' && clubs.length < 3) fmt = 'single';
   const T = { fmt, seeds: e.map((x, i) => ({ club: Number(x.ClubID), seed: i + 1 })), created: Date.now(), wave: 0, matches: [], final: null };
-  Object.assign(T, fmt === 'double' ? buildDouble_(clubs, lc_(C.GRAND_FINAL_RESET) !== 'no') : buildSingle_(clubs, {}));
+  const build = (cl) => (fmt === 'double' ? buildDouble_(cl, lc_(C.GRAND_FINAL_RESET) !== 'no') : buildSingle_(cl, {}));
+  let built = build(clubs);
+  // Random seeding: an owner with more than one club gets them spread apart, so they meet as late as possible.
+  if (how === 'random') {
+    const own = {}; e.forEach((x) => { const k = lc_(x.Email) || lc_(x.Discord) || String(x.ClubID); (own[k] = own[k] || []).push(Number(x.ClubID)); });
+    const pairs = []; Object.keys(own).forEach((k) => { const c = own[k]; for (let i = 0; i < c.length; i++) for (let j = i + 1; j < c.length; j++) pairs.push([c[i], c[j]]); });
+    if (pairs.length) {
+      let best = { cl: clubs, b: built, score: meetScore_(built.matches, pairs) };
+      for (let t = 0; t < 600 && best.score > 0; t++) {
+        const cl = clubs.slice(); for (let i = cl.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const x = cl[i]; cl[i] = cl[j]; cl[j] = x; }
+        const b = build(cl), sc = meetScore_(b.matches, pairs);
+        if (sc < best.score) best = { cl, b, score: sc };
+      }
+      clubs.splice(0, clubs.length, ...best.cl); built = best.b;
+      T.seeds = clubs.map((c, i) => ({ club: c, seed: i + 1 }));
+    }
+  }
+  Object.assign(T, built);
   settle_(T);
   return T;
+}
+// How early same-owner clubs could meet: for every match, which clubs could be on each side and how many games
+// deep it is. Each pair scores more the earlier they could meet (0 = only in the last game or never).
+function meetScore_(matches, pairs) {
+  const by = {}; matches.forEach((m) => { by[m.id] = m; });
+  const memo = {};
+  const info = (id) => {
+    if (memo[id]) return memo[id];
+    const m = by[id], side = (sd) => (sd.from ? { set: info(sd.from).all, d: info(sd.from).d } : { set: sd.club > 0 ? [sd.club] : [], d: 0 });
+    const a = side(m.a), b = side(m.b);
+    return (memo[id] = { a: a.set, b: b.set, all: a.set.concat(b.set), d: 1 + Math.max(a.d, b.d) });
+  };
+  const all = matches.map((m) => info(m.id)), deep = Math.max.apply(null, all.map((x) => x.d));
+  let score = 0;
+  pairs.forEach(([x, y]) => {
+    let first = deep + 1;
+    all.forEach((m) => { if ((m.a.indexOf(x) >= 0 && m.b.indexOf(y) >= 0) || (m.a.indexOf(y) >= 0 && m.b.indexOf(x) >= 0)) first = Math.min(first, m.d); });
+    score += Math.pow(Math.max(0, deep - first), 2);
+  });
+  return score;
 }
 
 // ===================== State =====================
